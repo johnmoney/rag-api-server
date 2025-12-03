@@ -144,8 +144,8 @@ def generate_rag_answer(context: str, question: str, history: List[Dict[str, str
     
     payload = {
         "contents": api_messages,
-        # Use the dedicated systemInstruction field for instructions
-        "systemInstruction": system_prompt, 
+        # --- FIX: systemInstruction must be a Content object, not a raw string ---
+        "systemInstruction": {"parts": [{"text": system_prompt}]}, 
     }
     
     # Base URL without the key, for logging
@@ -184,6 +184,7 @@ def generate_rag_answer(context: str, question: str, history: List[Dict[str, str
         print(f"Gemini API Request Error: {e}")
         # Return the status code and text if available, avoiding the full URL object 'e'
         if hasattr(e, 'response') and e.response is not None:
+             # This message is sent back to the client
              error_message = f"HTTP {e.response.status_code} - See server logs for detail."
         else:
              error_message = f"Network failure: Check server connection/DNS."

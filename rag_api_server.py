@@ -1,28 +1,25 @@
-import os
 import uvicorn
 import requests
 import json
 import uuid
+import os # NEW: Import os for environment variable access
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any
-from fastapi.middleware.cors import CORSMiddleware # NEW: Import CORS middleware
+from fastapi.middleware.cors import CORSMiddleware # Need to explicitly import for Render deployment
 
-# --- NOTE: Replace with your actual Gemini API Key ---
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "MISSING_KEY")
+# --- API Configuration ---
+# UPDATED: Read GEMINI_API_KEY from the environment variable (Render config)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "MISSING_KEY") 
 API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 # --- Mock Vector Store / Document Storage (In-memory for PoC) ---
-# Key: documentId (str), Value: List of document chunks (str)
 MOCK_VECTOR_STORE: Dict[str, List[str]] = {}
 
 app = FastAPI(title="RAG PoC Backend")
 
-# --- CORS Middleware Configuration (MANDATORY for Cross-Origin Calls) ---
-# Allows the React component (on the Drupal domain) to communicate with this API.
-# In a real environment, replace "*" with your specific Drupal domain for security.
-origins = ["*"] 
-
+# --- CORS Configuration ---
+origins = ["*"] # Allow all origins for demo/Canvas
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -39,25 +36,25 @@ class IngestRequest(BaseModel):
 class QueryRequest(BaseModel):
     documentId: str
     question: str
-    history: List[Dict[str, str]] = [] # Optional chat history
+    # Note: Frontend must send sanitized history: List[{"role": str, "content": str}]
+    history: List[Dict[str, str]] = [] 
 
 class APIResponse(BaseModel):
     documentId: str = None
     answer: str = None
     status: str
 
-# --- CORE RAG FUNCTIONS (Mocked/Conceptual) ---
+# --- CORE RAG FUNCTIONS ---
 
 def fetch_and_extract_pdf_text(url: str) -> str:
     """
-    CONCEPTUAL: Fetches the PDF from the URL and extracts text.
+    MOCK: Fetches the PDF from the URL and extracts text.
     """
     print(f"-> Attempting to fetch and extract PDF from: {url}")
     
     # --- MOCK IMPLEMENTATION START ---
     doc_id = str(uuid.uuid4())
     
-    # Simple document text for demonstration
     mock_document_text = f"""
     [Document ID: {doc_id}]
     The company's proposal for Q3 focuses on three core initiatives: Project Titan, 
@@ -77,7 +74,7 @@ def fetch_and_extract_pdf_text(url: str) -> str:
 
 def chunk_and_embed_text(text: str) -> List[str]:
     """
-    CONCEPTUAL: Chunks the text and creates embeddings (vectors).
+    MOCK: Chunks the text.
     """
     # --- MOCK IMPLEMENTATION START ---
     chunks = [c.strip() for c in text.split('.') if c.strip()]
@@ -87,7 +84,7 @@ def chunk_and_embed_text(text: str) -> List[str]:
 
 def retrieve_relevant_context(doc_id: str, question: str) -> str:
     """
-    CONCEPTUAL: Finds the most relevant document chunks based on the question.
+    MOCK: Finds the most relevant document chunks based on the question.
     """
     # --- MOCK IMPLEMENTATION START ---
     if doc_id not in MOCK_VECTOR_STORE:
@@ -113,8 +110,10 @@ def generate_rag_answer(context: str, question: str, history: List[Dict[str, str
     """
     ACTUAL API CALL: Constructs the augmented prompt and calls the Gemini API.
     """
-    if not os.environ.get("GEMINI_API_KEY"): # Or check the hardcoded variable
-        raise HTTPException(status_code=400, detail="Gemini API key is missing on server.")
+    if GEMINI_API_KEY == "MISSING_KEY": # Check against the default used when reading env var fails
+        # This should theoretically not happen if Render is configured correctly, 
+        # but serves as a clear internal check.
+        return "ERROR: Gemini API key failed to load from environment variables."
 
     system_prompt = (
         "You are a Proposal Analyst AI. Your task is to answer the user's question "
@@ -125,18 +124,23 @@ def generate_rag_answer(context: str, question: str, history: List[Dict[str, str
     
     rag_prompt = f"CONTEXT:\n---\n{context}\n---\nQUESTION: {question}"
 
-    # Build the message history
+    # Build the message history for the 'contents' array
     api_messages = []
-    
-    # Add system instruction
-    api_messages.append({"role": "system", "parts": [{"text": system_prompt}]})
 
-    # Add RAG prompt (User role with all context/question)
+    # 1. Add previous conversation history (Sanitized history from frontend)
+    for msg in history:
+        # FastAPI frontend history schema: {"role": str, "content": str}
+        # Gemini API schema: {"role": str, "parts": [{"text": str}]}
+        api_messages.append({"role": msg['role'], "parts": [{"text": msg['content']}]})
+    
+    # 2. Add the current RAG-augmented prompt as the final user message
+    # The current query and its context is always from the user's perspective
     api_messages.append({"role": "user", "parts": [{"text": rag_prompt}]})
     
     payload = {
         "contents": api_messages,
-        "systemInstruction": system_prompt, # Set as system instruction for Gemini API
+        # Use the dedicated systemInstruction field for instructions
+        "systemInstruction": system_prompt, 
     }
 
     try:
@@ -145,8 +149,10 @@ def generate_rag_answer(context: str, question: str, history: List[Dict[str, str
             headers={"Content-Type": "application/json"},
             params={"key": GEMINI_API_KEY},
             data=json.dumps(payload),
-            timeout=10
+            timeout=15 # Increased timeout slightly
         )
+        
+        # Raise an exception for 4xx or 5xx status codes
         response.raise_for_status()
         
         data = response.json()
@@ -155,11 +161,15 @@ def generate_rag_answer(context: str, question: str, history: List[Dict[str, str
         if data.get('candidates') and data['candidates'][0].get('content'):
              return data['candidates'][0]['content']['parts'][0]['text']
         else:
+            # If API returns success but no content, log and return error
+            print(f"Gemini API returned no candidates: {data}")
             return "AI failed to generate a coherent response."
 
     except requests.exceptions.RequestException as e:
+        # This catches connection errors, DNS failure, and status code errors from raise_for_status()
         print(f"Gemini API Request Error: {e}")
-        return f"Gemini API Error: Could not connect or received an error."
+        # Return the specific error from the network request
+        return f"Gemini API Request Error: {e}"
 
 
 # --- API Endpoints ---
@@ -177,7 +187,6 @@ async def ingest_document(request: IngestRequest):
         chunks = chunk_and_embed_text(document_text)
         
         # 3. Generate unique ID and store (Mocked)
-        # Note: We use the first 8 characters of a UUID for the mock ID
         doc_id = str(uuid.uuid4())[:8] 
         MOCK_VECTOR_STORE[doc_id] = chunks
         
@@ -217,9 +226,10 @@ async def query_document(request: QueryRequest):
             status="success"
         )
     except Exception as e:
+        # This catches errors not specifically handled above, like failed retrieval
         print(f"Query Error: {e}")
         raise HTTPException(status_code=500, detail=f"RAG query failed: {e}")
 
-# To run the server: uvicorn rag_api_server:app --host 0.0.0.0 --port 8000
+# To run the server: uvicorn rag_backend_server:app --host 0.0.0.0 --port 8000
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -1,3 +1,4 @@
+import os
 import uvicorn
 import requests
 import json
@@ -8,7 +9,7 @@ from typing import List, Dict, Any
 from fastapi.middleware.cors import CORSMiddleware # NEW: Import CORS middleware
 
 # --- NOTE: Replace with your actual Gemini API Key ---
-GEMINI_API_KEY = "AIzaSyA_lqdpx7x6XL6CeiFVqX9e17zgdn1EsMk"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "MISSING_KEY")
 API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 # --- Mock Vector Store / Document Storage (In-memory for PoC) ---
@@ -112,8 +113,8 @@ def generate_rag_answer(context: str, question: str, history: List[Dict[str, str
     """
     ACTUAL API CALL: Constructs the augmented prompt and calls the Gemini API.
     """
-    if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE":
-        return "ERROR: Gemini API key is not configured in the backend server."
+    if not os.environ.get("GEMINI_API_KEY"): # Or check the hardcoded variable
+        raise HTTPException(status_code=400, detail="Gemini API key is missing on server.")
 
     system_prompt = (
         "You are a Proposal Analyst AI. Your task is to answer the user's question "

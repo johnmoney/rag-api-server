@@ -144,8 +144,8 @@ def generate_rag_answer(context: str, question: str, history: List[Dict[str, str
     
     payload = {
         "contents": api_messages,
-        # --- FIX: systemInstruction must be a Content object, not a raw string ---
-        "systemInstruction": {"parts": [{"text": system_prompt}]}, 
+        # --- FIX: systemInstruction now includes the required 'role' key within the Content object ---
+        "systemInstruction": {"role": "system", "parts": [{"text": system_prompt}]}, 
     }
     
     # Base URL without the key, for logging

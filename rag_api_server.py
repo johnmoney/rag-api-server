@@ -110,9 +110,7 @@ def generate_rag_answer(context: str, question: str, history: List[Dict[str, str
     """
     ACTUAL API CALL: Constructs the augmented prompt and calls the Gemini API.
     """
-    if GEMINI_API_KEY == "MISSING_KEY": # Check against the default used when reading env var fails
-        # This should theoretically not happen if Render is configured correctly, 
-        # but serves as a clear internal check.
+    if GEMINI_API_KEY == "MISSING_KEY": 
         return "ERROR: Gemini API key failed to load from environment variables."
 
     system_prompt = (
@@ -130,11 +128,18 @@ def generate_rag_answer(context: str, question: str, history: List[Dict[str, str
     # 1. Add previous conversation history (Sanitized history from frontend)
     for msg in history:
         # FastAPI frontend history schema: {"role": str, "content": str}
+        role = msg['role'].lower()
+        
+        # --- FIX: Map 'ai' role to 'model' and filter out 'system' roles ---
+        if role == 'ai':
+            role = 'model'
+        elif role == 'system':
+            continue # Skip system/internal messages from history
+        
         # Gemini API schema: {"role": str, "parts": [{"text": str}]}
-        api_messages.append({"role": msg['role'], "parts": [{"text": msg['content']}]})
+        api_messages.append({"role": role, "parts": [{"text": msg['content']}]})
     
     # 2. Add the current RAG-augmented prompt as the final user message
-    # The current query and its context is always from the user's perspective
     api_messages.append({"role": "user", "parts": [{"text": rag_prompt}]})
     
     payload = {
@@ -142,18 +147,27 @@ def generate_rag_answer(context: str, question: str, history: List[Dict[str, str
         # Use the dedicated systemInstruction field for instructions
         "systemInstruction": system_prompt, 
     }
+    
+    # Base URL without the key, for logging
+    log_url = f"{API_BASE_URL}/models/gemini-2.5-flash-preview-09-2025:generateContent"
 
     try:
         response = requests.post(
-            f"{API_BASE_URL}/models/gemini-2.5-flash-preview-09-2025:generateContent",
+            log_url, # Use URL without key
             headers={"Content-Type": "application/json"},
             params={"key": GEMINI_API_KEY},
             data=json.dumps(payload),
-            timeout=15 # Increased timeout slightly
+            timeout=15 
         )
         
-        # Raise an exception for 4xx or 5xx status codes
-        response.raise_for_status()
+        # --- NEW ERROR HANDLING START ---
+        if response.status_code >= 400:
+            # Log the status code and response body (which usually contains the error reason)
+            error_detail = response.text 
+            print(f"Gemini API Error (Status: {response.status_code}): {error_detail}")
+            # Raise generic exception without the URL
+            response.raise_for_status() 
+        # --- NEW ERROR HANDLING END ---
         
         data = response.json()
         
@@ -168,8 +182,13 @@ def generate_rag_answer(context: str, question: str, history: List[Dict[str, str
     except requests.exceptions.RequestException as e:
         # This catches connection errors, DNS failure, and status code errors from raise_for_status()
         print(f"Gemini API Request Error: {e}")
-        # Return the specific error from the network request
-        return f"Gemini API Request Error: {e}"
+        # Return the status code and text if available, avoiding the full URL object 'e'
+        if hasattr(e, 'response') and e.response is not None:
+             error_message = f"HTTP {e.response.status_code} - See server logs for detail."
+        else:
+             error_message = f"Network failure: Check server connection/DNS."
+             
+        return f"Gemini API Request Error: {error_message}"
 
 
 # --- API Endpoints ---

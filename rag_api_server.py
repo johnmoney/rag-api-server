@@ -3,6 +3,8 @@ import requests
 import json
 import uuid
 import os # NEW: Import os for environment variable access
+from io import BytesIO # NEW: Import BytesIO for in-memory file handling
+from pypdf import PdfReader # NEW: Library for PDF reading/extraction. Requires 'pypdf' in requirements.txt
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any
@@ -48,36 +50,63 @@ class APIResponse(BaseModel):
 
 def fetch_and_extract_pdf_text(url: str) -> str:
     """
-    MOCK: Fetches the PDF from the URL and extracts text.
+    REAL IMPLEMENTATION: Fetches the PDF from the URL and extracts text.
+    
+    Raises:
+        HTTPException: If the PDF download or parsing fails.
     """
     print(f"-> Attempting to fetch and extract PDF from: {url}")
     
-    # --- MOCK IMPLEMENTATION START ---
-    doc_id = str(uuid.uuid4())
-    
-    mock_document_text = f"""
-    [Document ID: {doc_id}]
-    The company's proposal for Q3 focuses on three core initiatives: Project Titan, 
-    Project Zenith, and Project Echo. Project Titan is allocated $500,000 and is 
-    expected to complete by the end of September. Project Zenith is a longer-term 
-    R&D effort focused on sustainable energy, with a projected timeline of 18 months 
-    and a budget of $2.5 million. The key performance indicator (KPI) for Zenith is 
-    a 20% efficiency increase in battery prototypes. Project Echo, valued at $300,000, 
-    is a market research study scheduled for July and August. The lead contact for 
-    Project Titan is Jane Doe. All projects must adhere to the new security protocols 
-    outlined in Section 4. 
-    """
-    
-    return mock_document_text.strip()
-    # --- MOCK IMPLEMENTATION END ---
+    try:
+        # 1. Download the PDF content
+        response = requests.get(url, stream=True, timeout=30)
+        response.raise_for_status() # Check for bad status codes (4xx, 5xx)
+        
+        # 2. Use BytesIO to treat the downloaded binary content as a file
+        file_stream = BytesIO(response.content)
+        
+        # 3. Extract text using pypdf
+        reader = PdfReader(file_stream)
+        text = ""
+        
+        # Extract text page by page
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+        
+        if not text.strip():
+            raise ValueError("PDF extraction resulted in empty content.")
+
+        print(f"-> Successfully extracted {len(text)} characters from the PDF.")
+        return text.strip()
+
+    except requests.exceptions.RequestException as e:
+        # Catch download errors (timeout, connection, 404, etc.)
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Failed to download PDF from URL: {e}"
+        )
+    except Exception as e:
+        # Catch PDF parsing errors
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to extract text from PDF: {e}"
+        )
 
 
 def chunk_and_embed_text(text: str) -> List[str]:
     """
     MOCK: Chunks the text.
+    (In a real application, a library like LangChain TextSplitter would be used here.)
     """
-    # --- MOCK IMPLEMENTATION START ---
-    chunks = [c.strip() for c in text.split('.') if c.strip()]
+    # --- MOCK IMPLEMENTATION START (now using real input text) ---
+    # Since we don't know the exact length, we'll split by double newline as a basic chunking technique
+    chunks = [c.strip() for c in text.split('\n\n') if c.strip()]
+    
+    # Fallback if double newline split fails (e.g., highly compressed text)
+    if len(chunks) < 2 and len(text) > 1000:
+        chunk_size = 500
+        chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+        
     return chunks
     # --- MOCK IMPLEMENTATION END ---
 
@@ -85,6 +114,7 @@ def chunk_and_embed_text(text: str) -> List[str]:
 def retrieve_relevant_context(doc_id: str, question: str) -> str:
     """
     MOCK: Finds the most relevant document chunks based on the question.
+    (In a real application, vector search would occur here.)
     """
     # --- MOCK IMPLEMENTATION START ---
     if doc_id not in MOCK_VECTOR_STORE:
@@ -93,16 +123,21 @@ def retrieve_relevant_context(doc_id: str, question: str) -> str:
     document_chunks = MOCK_VECTOR_STORE[doc_id]
     
     # Trivial keyword matching for PoC
-    relevant_chunks = [
-        chunk for chunk in document_chunks 
-        if any(word.lower() in chunk.lower() for word in question.split())
-    ]
+    question_words = set(word.lower() for word in question.split() if len(word) > 3)
+    
+    relevant_chunks = []
+    
+    # Select chunks that contain any of the question words
+    for chunk in document_chunks:
+        if any(q_word in chunk.lower() for q_word in question_words):
+            relevant_chunks.append(chunk)
 
-    # If no keywords match, just return the first two chunks as mock context
+    # If no keywords match, just return the first chunk as mock context
     if not relevant_chunks:
-        relevant_chunks = document_chunks[:2]
+        relevant_chunks = document_chunks[:1]
         
-    return "\n---\n".join(relevant_chunks)
+    # Limit to a maximum of 3 chunks for context window management
+    return "\n---\n".join(relevant_chunks[:3])
     # --- MOCK IMPLEMENTATION END ---
 
 
@@ -114,13 +149,25 @@ def generate_rag_answer(context: str, question: str, history: List[Dict[str, str
         return "ERROR: Gemini API key failed to load from environment variables."
 
     system_prompt = (
-        "You are a Proposal Analyst AI. Your task is to answer the user's question "
-        "using ONLY the provided CONTEXT. Do not use external knowledge. "
-        "If the answer is not found in the context, state 'I cannot find that information in the document.' "
-        "Be concise and professional."
+        "You are a Proposal Analyst AI. Your primary goal is to provide accurate, concise, "
+        "and direct answers."
     )
     
-    rag_prompt = f"CONTEXT:\n---\n{context}\n---\nQUESTION: {question}"
+    # --- FIX: Strengthened RAG Prompt Template to enforce extraction ---
+    rag_prompt = f"""
+DOCUMENT CONTEXT:
+---
+{context}
+---
+
+USER QUESTION: {question}
+
+INSTRUCTION: Based ONLY on the DOCUMENT CONTEXT above, provide a concise answer to the USER QUESTION. 
+Do not elaborate or use external knowledge. If the answer is not present in the context, state: 
+"I cannot find that information in the document."
+
+ANSWER:
+"""
 
     # Build the message history for the 'contents' array
     api_messages = []
@@ -144,7 +191,6 @@ def generate_rag_answer(context: str, question: str, history: List[Dict[str, str
     
     payload = {
         "contents": api_messages,
-        # --- FIX: systemInstruction now includes the required 'role' key within the Content object ---
         "systemInstruction": {"role": "system", "parts": [{"text": system_prompt}]}, 
     }
     
@@ -200,7 +246,7 @@ async def ingest_document(request: IngestRequest):
     Endpoint 1: Ingests a PDF document URL, processes it, and stores the chunks.
     """
     try:
-        # 1. Fetch & Extract Text
+        # 1. Fetch & Extract REAL Text
         document_text = fetch_and_extract_pdf_text(request.pdfUrl)
         
         # 2. Chunk & Embed (Mocked)
@@ -218,6 +264,9 @@ async def ingest_document(request: IngestRequest):
         )
     except Exception as e:
         print(f"Ingestion Error: {e}")
+        # Re-raise HTTPException to ensure the client receives a correct error status
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=f"Document ingestion failed: {e}")
 
 @app.post("/api/query", response_model=APIResponse)
